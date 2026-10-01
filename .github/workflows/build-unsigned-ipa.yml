@@ -1,0 +1,94 @@
+name: Build unsigned FreeTube IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/build-unsigned-ipa.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check Xcode
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          major=$(xcodebuild -version | awk '/^Xcode / {split($2,v,"."); print v[1]}')
+          test "$major" -ge 26
+          mkdir -p build/logs
+          git rev-parse HEAD > build/source-commit.txt
+
+      - name: Resolve Swift packages
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies \
+            -project FreeTube/FreeTube.xcodeproj \
+            -scheme FreeTube \
+            -clonedSourcePackagesDirPath "$PWD/build/SourcePackages" \
+            2>&1 | tee build/logs/packages.log
+
+      - name: Build for iPhone and iPad
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project FreeTube/FreeTube.xcodeproj \
+            -scheme FreeTube \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -sdk iphoneos \
+            -derivedDataPath "$PWD/build/DerivedData" \
+            -clonedSourcePackagesDirPath "$PWD/build/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            2>&1 | tee build/logs/build.log
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          app="$PWD/build/DerivedData/Build/Products/Release-iphoneos/FreeTube.app"
+          test -f "$app/Info.plist"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist")
+          test -f "$app/$executable"
+          xcrun lipo -verify_arch arm64 "$app/$executable"
+          mkdir -p build/package/Payload
+          ditto "$app" build/package/Payload/FreeTube.app
+          cd build/package
+          ditto -c -k --sequesterRsrc --keepParent Payload ../FreeTube-unsigned.ipa
+          cd ..
+          shasum -a 256 FreeTube-unsigned.ipa > FreeTube-unsigned.ipa.sha256
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeTube-unsigned-${{ github.run_number }}
+          path: |
+            build/FreeTube-unsigned.ipa
+            build/FreeTube-unsigned.ipa.sha256
+            build/source-commit.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FreeTube-build-logs-${{ github.run_number }}
+          path: build/logs/
+          if-no-files-found: ignore
+          retention-days: 14
